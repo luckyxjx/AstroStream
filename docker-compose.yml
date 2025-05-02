@@ -1,0 +1,132 @@
+# docker-compose.yml
+# Defines the services needed for the AstroStream project
+
+version: '3.8' # Use a recent version of Docker Compose
+
+services:
+  # Zookeeper: Required by Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.2 # Use a stable Confluent Zookeeper image
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181         # Port Zookeeper listens on
+      ZOOKEEPER_TICK_TIME: 2000           # Basic time unit in milliseconds
+    ports:
+      - "2181:2181"                       # Expose Zookeeper port to host (optional, for debugging)
+
+  # Kafka Broker: The message queue
+  kafka:
+    image: confluentinc/cp-kafka:7.3.2    # Use a stable Confluent Kafka image
+    container_name: kafka
+    depends_on:
+      - zookeeper                         # Kafka needs Zookeeper to be running first
+    ports:
+      - "9092:9092"                       # Expose Kafka's main port to the host
+      - "29092:29092"                     # Expose Kafka's port for inter-container communication
+    environment:
+      KAFKA_BROKER_ID: 1                  # Unique ID for the Kafka broker
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181' # How Kafka finds Zookeeper
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT # Define security protocols
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092 # How clients connect (internal & external)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1 # Replication factor for internal topics (1 for single broker setup)
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0 # Delay before consumers can join a group
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1 # Confluent specific setting
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1 # Confluent specific setting
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1 # Required for transactions
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1 # Required for transactions
+
+  # MongoDB: Data storage
+  mongo:
+    image: mongo:latest                   # Use the latest official MongoDB image
+    container_name: mongo
+    ports:
+      - "27017:27017"                     # Expose MongoDB port to the host
+    volumes:
+      - mongo_data:/data/db               # Persist MongoDB data using a named volume
+
+  # Spark Master: Coordinates Spark workers (needed even for local mode in this setup)
+  spark-master:
+    image: bitnami/spark:3.4              # Use a stable Bitnami Spark image (adjust version if needed)
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master                 # Set Spark mode to master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - '8080:8080'                       # Spark Master Web UI
+      - '7077:7077'                       # Spark Master communication port
+
+  # Spark Worker: Executes tasks (connects to the master)
+  spark-worker:
+    image: bitnami/spark:3.4
+    container_name: spark-worker
+    depends_on:
+      - spark-master                      # Worker needs the master
+    environment:
+      - SPARK_MODE=worker                 # Set Spark mode to worker
+      - SPARK_MASTER_URL=spark://spark-master:7077 # How the worker finds the master
+      - SPARK_WORKER_MEMORY=1G            # Allocate memory to the worker
+      - SPARK_WORKER_CORES=1              # Allocate CPU cores to the worker
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    volumes: # Mount the processor code into the worker where Spark can find it
+      - ./spark-processor:/opt/bitnami/spark/app
+
+  # Data Fetcher Service (Python script)
+  fetcher:
+    build: ./fetcher                      # Build the image from the fetcher directory
+    container_name: fetcher
+    depends_on:
+      - kafka                             # Fetcher needs Kafka to be ready
+    environment:
+      - KAFKA_BROKER=kafka:29092          # Kafka address inside the Docker network
+      # !!! IMPORTANT: Replace YOUR_NASA_API_KEY with your actual key !!!
+      - NASA_API_KEY=""
+      - FETCH_INTERVAL_SECONDS=3600       # How often to fetch (e.g., 1 hour = 3600 seconds)
+    volumes:
+        - ./fetcher:/app                  # Mount the code for easier development (optional)
+
+  # Spark Processing Job Runner (Submits the PySpark script)
+  # This is a simple way to run the job; more robust methods exist
+  spark-job-runner:
+      build: ./spark-processor            # Build image with PySpark script and dependencies
+      container_name: spark-job-runner
+      depends_on:
+        - spark-master
+        - kafka
+        - mongo
+      environment:
+        - SPARK_MASTER_URL=spark://spark-master:7077
+        - KAFKA_BROKER=kafka:29092
+        - MONGO_URI=mongodb://mongo:27017/ # MongoDB connection string inside Docker
+      volumes: # Mount the processor code
+        - ./spark-processor:/app
+      # Command to submit the Spark job ONCE the container starts
+      # Adjust packages based on Spark/Kafka/Mongo connector versions if needed
+      command: >
+        spark-submit
+        --master spark://spark-master:7077
+        --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,org.mongodb.spark:mongo-spark-connector_2.12:10.2.0
+        /app/process_flares.py
+
+  # Dashboard Service (Flask/Dash app)
+  dashboard:
+    build: ./dashboard                    # Build the image from the dashboard directory
+    container_name: dashboard
+    depends_on:
+      - mongo                             # Dashboard needs MongoDB
+    ports:
+      - "8050:8050"                       # Expose Dash app port to the host
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/ # MongoDB connection string inside Docker
+    volumes:
+        - ./dashboard:/app                # Mount the code for easier development (optional)
+
+
+# Named volume for MongoDB data persistence
+volumes:
+  mongo_data:
