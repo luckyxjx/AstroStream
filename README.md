@@ -115,22 +115,6 @@ docker-compose down -v
 
 ---
 
-## 🔧 Fixing Dashboard Obsolete Error
-
-### If you encounter `ObsoleteAttributeException`, apply this fix:
-
-1. Open `dashboard/app.py` and ensure the **last line** reads:
-
-```python
-app.run(...)  # instead of app.run_server(...)
-```
-
-2. Rebuild only the dashboard container:
-
-```bash
-docker-compose build dashboard
-```
-
 3. Restart services:
 
 ```bash
@@ -153,12 +137,6 @@ docker-compose logs dashboard
 * **Apache Spark** (data processing)
 * **Docker & Docker Compose** (container orchestration)
 * **NASA API** (data source)
-
----
-
-## 📄 License
-
-MIT License. See `LICENSE` file for details.
 
 ---
 
